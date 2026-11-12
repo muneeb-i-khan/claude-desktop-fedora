@@ -100,7 +100,7 @@ Claude Desktop stores your sign-in in the desktop keyring (GNOME Keyring or KDE 
 ## How the packages are built
 
 1. `scripts/upstream.sh` downloads Anthropic's signing key and **refuses to continue unless its fingerprint is exactly `31DD DE24 DDFA B679 F42D 7BD2 BAA9 29FF 1A7E CACE`** (the fingerprint in Anthropic's own install docs).
-2. It verifies the repo's `InRelease` signature with `gpgv`, checks the `Packages` index hash against it, picks the newest version published for both architectures, then checks the `.deb`'s size and SHA-256 against the index.
+2. It verifies the repo's `InRelease` signature with `gpg`, checks the `Packages` index hash against it, picks the newest version published for both architectures, then checks the `.deb`'s size and SHA-256 against the index.
 3. `packaging/claude-desktop.spec` unpacks the `.deb` with `ar` and `tar` (no `alien`) into `/usr/lib/claude-desktop`. It replaces upstream's `/usr/bin/claude-desktop` symlink with the wrapper, and ships what upstream's `postinst` would have created at install time (GNOME search provider, MIME types) as ordinary package files. Upstream's apt-repository registration and AppArmor profile are intentionally **not** reproduced.
 4. The workflow runs `rpmlint` (non-blocking; known noise for prebuilt binaries is filtered in `packaging/rpmlint.toml`), checks `rpm -qpi` / `rpm -qpl`, and smoke-tests `dnf install` plus `rpm -V` in a clean `fedora:latest` container.
 

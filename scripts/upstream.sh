@@ -11,7 +11,7 @@
 #   upstream.sh fetch    <amd64|arm64> <outdir> [version]
 #                                                   download + verify the .deb (default: newest)
 #
-# Requires: bash, curl, gpg, gpgv (Fedora: gnupg2), awk, sha256sum, sort -V.
+# Requires: bash, curl, gpg (Fedora: gnupg2), awk, sha256sum, sort -V.
 set -euo pipefail
 
 BASE_URL="${CLAUDE_APT_BASE:-https://downloads.claude.ai/claude-desktop}"
@@ -43,7 +43,6 @@ import_key() {
   fprs="$(gpg --batch --with-colons --fingerprint | awk -F: '$1 == "pub" {p=1; next} p && $1 == "fpr" {print $10; p=0}')"
   [ "$fprs" = "$EXPECTED_FPR" ] ||
     die "signing key fingerprint mismatch: expected $EXPECTED_FPR, got '${fprs:-none}'"
-  gpg --batch --export >"$WORK/keyring.gpg"
 }
 
 # Verify InRelease against the pinned key and refuse an expired one
@@ -52,9 +51,12 @@ fetch_release() {
   [ -s "$WORK/Release" ] && return 0
   import_key
   get "$REPO_URL/dists/stable/InRelease" "$WORK/InRelease"
-  gpgv --quiet --homedir "$GNUPGHOME" --keyring "$WORK/keyring.gpg" \
-    --output "$WORK/Release" "$WORK/InRelease" 2>"$WORK/gpgv.log" ||
-    die "InRelease signature verification FAILED: $(cat "$WORK/gpgv.log")"
+  # gpg (not gpgv) so the key we just fingerprint-checked is the one used, and
+  # require the signature to come from that exact key.
+  gpg --batch --status-fd 1 --output "$WORK/Release" --decrypt "$WORK/InRelease" \
+    >"$WORK/gpg.status" 2>"$WORK/gpg.log" || die "InRelease signature verification FAILED: $(cat "$WORK/gpg.log")"
+  grep -q "^\[GNUPG:\] VALIDSIG .*$EXPECTED_FPR" "$WORK/gpg.status" ||
+    die "InRelease is not signed by $EXPECTED_FPR"
   local valid_until
   valid_until="$(sed -n 's/^Valid-Until: //p' "$WORK/Release")"
   if [ -n "$valid_until" ] && [ "$(date -d "$valid_until" +%s)" -lt "$(date +%s)" ]; then
@@ -89,6 +91,8 @@ index() {
 }
 
 cmd="${1:-}"
+# Verify once up front: `common` runs two index lookups in parallel subshells.
+case "$cmd" in versions | latest | common | fetch) fetch_release ;; *) ;; esac
 case "$cmd" in
   versions)
     check_arch "${2:-}"
