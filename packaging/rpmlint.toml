@@ -1,0 +1,21 @@
+# rpmlint filters for a repackaged proprietary Electron application.
+# Everything silenced here is expected for prebuilt upstream binaries that this
+# project cannot (and does not try to) change.
+Filters = [
+    # Prebuilt upstream Go/Rust/Electron binaries
+    "statically-linked-binary",
+    "unstripped-binary-or-object",
+    "position-independent-executable-suggested",
+    "missing-call-to-setgroups-before-setuid",
+    "binary-or-shlib-calls-gethostbyname",
+    # Chromium's SUID sandbox helper is intentional
+    "setuid-binary",
+    "non-standard-executable-perm",
+    # Dependencies are declared by hand because AutoReqProv is off
+    "explicit-lib-dependency",
+    # Proprietary licence has no SPDX identifier
+    "invalid-license",
+    # Upstream ships no man page / docs
+    "no-manual-page-for-binary",
+    "no-documentation",
+]
