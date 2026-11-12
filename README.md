@@ -6,14 +6,14 @@ A GitHub Actions workflow checks Anthropic's apt repository every 6 hours, repac
 
 > **Unofficial.** Anthropic's own Linux docs support Ubuntu and Debian only. This package is community-maintained and not tested or endorsed by Anthropic. See the [disclaimer](#legal-disclaimer).
 
-> **Using this from a fork or copy?** Replace `OWNER` and `REPO` below with your GitHub user and repository name (the workflow fills them in automatically for its own generated files). `OWNER` must be lowercase in the `github.io` URL.
+> **Using a fork?** Replace `muneeb-i-khan/claude-desktop-fedora` in the URLs below with your own `user/repo`; the `github.io` hostname uses your lowercase username. The workflow fills in the right values automatically in the files it generates.
 
 ## Install with DNF (recommended)
 
 ```bash
 # DNF 5 (Fedora 41+)
-sudo dnf config-manager addrepo --from-repofile=https://OWNER.github.io/REPO/claude-desktop.repo
-# DNF 4 (older releases): sudo dnf config-manager --add-repo https://OWNER.github.io/REPO/claude-desktop.repo
+sudo dnf config-manager addrepo --from-repofile=https://muneeb-i-khan.github.io/claude-desktop-fedora/claude-desktop.repo
+# DNF 4 (older releases): sudo dnf config-manager --add-repo https://muneeb-i-khan.github.io/claude-desktop-fedora/claude-desktop.repo
 
 sudo dnf install claude-desktop
 ```
@@ -22,7 +22,7 @@ Updates arrive with your normal `sudo dnf upgrade`. Launch **Claude** from your 
 
 ## Install a single RPM
 
-Download the `.rpm` for your architecture from the [Releases page](https://github.com/OWNER/REPO/releases/latest), then:
+Download the `.rpm` for your architecture from the [Releases page](https://github.com/muneeb-i-khan/claude-desktop-fedora/releases/latest), then:
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
@@ -38,7 +38,7 @@ The app installs into `/usr/lib/claude-desktop` (not `/opt`), so it layers clean
 With the repository, which also gives you updates through `rpm-ostree upgrade`:
 
 ```bash
-sudo curl -fLo /etc/yum.repos.d/claude-desktop.repo https://OWNER.github.io/REPO/claude-desktop.repo
+sudo curl -fLo /etc/yum.repos.d/claude-desktop.repo https://muneeb-i-khan.github.io/claude-desktop-fedora/claude-desktop.repo
 rpm-ostree install claude-desktop
 systemctl reboot
 ```
@@ -129,7 +129,7 @@ GitHub disables scheduled workflows in repositories with no activity for 60 days
 
 ### Optional: sign the packages
 
-Without signing, the generated `.repo` file sets `gpgcheck=0` (transport is HTTPS, and upstream's signature and hashes are verified at build time). To sign RPMs and repository metadata, add these repository secrets; the `.repo` file then enables `gpgcheck=1` and `repo_gpgcheck=1` and the public key is published at `https://OWNER.github.io/REPO/RPM-GPG-KEY-claude-desktop-fedora`:
+Without signing, the generated `.repo` file sets `gpgcheck=0` (transport is HTTPS, and upstream's signature and hashes are verified at build time). To sign RPMs and repository metadata, add these repository secrets; the `.repo` file then enables `gpgcheck=1` and `repo_gpgcheck=1` and the public key is published at `https://muneeb-i-khan.github.io/claude-desktop-fedora/RPM-GPG-KEY-claude-desktop-fedora`:
 
 - `RPM_GPG_PRIVATE_KEY`: ASCII-armored private key (`gpg --armor --export-secret-keys <id>`)
 - `RPM_GPG_PASSPHRASE`: passphrase, if the key has one
