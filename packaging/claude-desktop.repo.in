@@ -1,0 +1,9 @@
+[claude-desktop]
+name=Claude Desktop (unofficial Fedora repackaging)
+baseurl=@BASEURL@
+enabled=1
+gpgcheck=@GPGCHECK@
+repo_gpgcheck=@GPGCHECK@
+@GPGKEY@
+metadata_expire=1h
+skip_if_unavailable=True
