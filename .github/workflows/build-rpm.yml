@@ -1,0 +1,294 @@
+name: Build Claude Desktop RPM
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild and republish even if the release for the newest upstream version already exists"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+
+concurrency:
+  group: build-rpm
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  FEDORA_IMAGE: fedora:latest
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Ask Anthropic's apt repository (signature-verified) for the newest version
+  # published for BOTH architectures, and stop early if we already released it.
+  # ---------------------------------------------------------------------------
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      build: ${{ steps.v.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Look up newest upstream version and existing releases
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          VERSION="$(./scripts/upstream.sh common)"
+          [ -n "$VERSION" ] || { echo "::error::could not determine upstream version"; exit 1; }
+          echo "Newest upstream version (amd64 + arm64): $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          if gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [ "${FORCE:-false}" = "true" ]; then
+              echo "Release v${VERSION} exists, but force was requested."
+              echo "build=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "Release v${VERSION} already exists - nothing to do."
+              echo "build=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "No release v${VERSION} yet - building."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Build and verify the RPM on each architecture inside a Fedora container.
+  # ---------------------------------------------------------------------------
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: fedora:latest
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - name: Install build tools
+        run: |
+          dnf install -y \
+            rpm-build rpmdevtools rpm-sign rpmlint binutils tar xz zstd gnupg2 \
+            curl gawk findutils git desktop-file-utils
+          dnf clean all
+
+      - uses: actions/checkout@v4
+
+      - name: Build RPM (downloads and verifies the upstream .deb)
+        run: ./scripts/build-rpm.sh "$VERSION"
+
+      - name: Sign RPM (optional)
+        env:
+          RPM_GPG_PRIVATE_KEY: ${{ secrets.RPM_GPG_PRIVATE_KEY }}
+          RPM_GPG_PASSPHRASE: ${{ secrets.RPM_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RPM_GPG_PRIVATE_KEY:-}" ]; then
+            echo "RPM_GPG_PRIVATE_KEY not set - publishing unsigned RPMs."
+            exit 0
+          fi
+          printf '%s\n' "$RPM_GPG_PRIVATE_KEY" | gpg --batch --import
+          KEYID="$(gpg --list-secret-keys --with-colons | awk -F: '$1=="sec"{print $5; exit}')"
+          extra=""
+          if [ -n "${RPM_GPG_PASSPHRASE:-}" ]; then
+            printf '%s' "$RPM_GPG_PASSPHRASE" > "$RUNNER_TEMP/pp"
+            extra="--pinentry-mode loopback --passphrase-file $RUNNER_TEMP/pp"
+          fi
+          rpmsign --define "_gpg_name $KEYID" \
+                  --define "_gpg_sign_cmd_extra_args $extra" \
+                  --addsign dist/*.rpm
+          rm -f "$RUNNER_TEMP/pp"
+
+      - name: Verify RPM
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          rpms=(dist/*.rpm)
+          [ "${#rpms[@]}" -eq 1 ] || { echo "::error::expected exactly one RPM, found ${#rpms[@]}"; exit 1; }
+          rpm_file="${rpms[0]}"
+
+          echo "::group::rpm -qpi"
+          rpm -qpi "$rpm_file"
+          echo "::endgroup::"
+
+          echo "::group::requires / recommends"
+          rpm -qp --requires "$rpm_file"
+          rpm -qp --recommends "$rpm_file"
+          echo "::endgroup::"
+
+          [ "$(rpm -qp --qf '%{VERSION}' "$rpm_file")" = "$VERSION" ] \
+            || { echo "::error::RPM version does not match $VERSION"; exit 1; }
+
+          rpm -qpl -v "$rpm_file" > "$RUNNER_TEMP/files.txt"
+          grep -q ' /usr/bin/claude-desktop$' "$RUNNER_TEMP/files.txt"
+          grep -q ' /usr/lib/claude-desktop/claude-desktop$' "$RUNNER_TEMP/files.txt"
+          grep -q ' /usr/share/applications/com.anthropic.Claude.desktop$' "$RUNNER_TEMP/files.txt"
+          grep -Eq '^-rwsr-xr-x .* /usr/lib/claude-desktop/chrome-sandbox$' "$RUNNER_TEMP/files.txt"
+          # Nothing may land in /opt: it breaks rpm-ostree layering.
+          ! grep -q ' /opt/' "$RUNNER_TEMP/files.txt"
+
+          echo "::group::rpmlint"
+          rpmlint -c packaging/rpmlint.toml "$rpm_file" || echo "::warning::rpmlint reported issues (non-blocking)"
+          echo "::endgroup::"
+
+      - name: Smoke test - install the RPM
+        run: |
+          set -euo pipefail
+          dnf install -y ./dist/*.rpm
+          rpm -V claude-desktop
+          test -x /usr/lib/claude-desktop/claude-desktop
+          test -x /usr/bin/claude-desktop
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm-${{ matrix.arch }}
+          path: dist/*.rpm
+          if-no-files-found: error
+          compression-level: 0
+
+  # ---------------------------------------------------------------------------
+  # Publish a GitHub Release with the RPMs, checksums and install instructions.
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rpm-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum ./*.rpm | sed 's| \./| |' | tee SHA256SUMS
+
+      - name: Write release notes
+        run: |
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPO="${GITHUB_REPOSITORY##*/}"
+          PAGES="https://${OWNER,,}.github.io/${REPO}"
+          cat > notes.md <<EOF
+          Unofficial RPM repackaging of Anthropic's official **Claude Desktop ${VERSION}** (Chat, Cowork, Claude Code), built from the signature-verified \`.deb\` in Anthropic's apt repository. Claude Desktop is proprietary software owned by Anthropic.
+
+          ### Install with DNF (recommended, receives updates)
+
+          \`\`\`bash
+          sudo dnf config-manager addrepo --from-repofile=${PAGES}/claude-desktop.repo
+          sudo dnf install claude-desktop
+          \`\`\`
+
+          ### Install this RPM directly
+
+          \`\`\`bash
+          sudo dnf install ./claude-desktop-${VERSION}-1.\$(uname -m).rpm
+          \`\`\`
+
+          ### Fedora Silverblue / Kinoite (rpm-ostree)
+
+          \`\`\`bash
+          sudo rpm-ostree install claude-desktop-${VERSION}-1.\$(uname -m).rpm
+          systemctl reboot
+          \`\`\`
+
+          Verify downloads with \`sha256sum -c SHA256SUMS --ignore-missing\`.
+          Full instructions (including Cowork/KVM setup): https://github.com/${GITHUB_REPOSITORY}#readme
+          EOF
+
+      - name: Create (or update) release
+        run: |
+          set -euo pipefail
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            gh release upload "v${VERSION}" dist/* --clobber
+            gh release edit "v${VERSION}" --notes-file notes.md
+          else
+            gh release create "v${VERSION}" dist/* \
+              --target "$GITHUB_SHA" \
+              --title "Claude Desktop ${VERSION}" \
+              --notes-file notes.md
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Build the static DNF repository (createrepo_c) for GitHub Pages.
+  # ---------------------------------------------------------------------------
+  repo:
+    needs: [check, build, release]
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      - name: Install tools
+        run: dnf install -y createrepo_c gnupg2 tar gzip git findutils
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rpm-*
+          path: dist
+          merge-multiple: true
+
+      - name: Import signing key (optional)
+        id: key
+        env:
+          RPM_GPG_PRIVATE_KEY: ${{ secrets.RPM_GPG_PRIVATE_KEY }}
+          RPM_GPG_PASSPHRASE: ${{ secrets.RPM_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RPM_GPG_PRIVATE_KEY:-}" ]; then
+            echo "No signing key configured - repository metadata will be unsigned."
+            exit 0
+          fi
+          export GPG_TTY=
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
+          echo "pinentry-mode loopback" > ~/.gnupg/gpg.conf
+          if [ -n "${RPM_GPG_PASSPHRASE:-}" ]; then
+            echo "passphrase-file $HOME/.gnupg/pp" >> ~/.gnupg/gpg.conf
+            printf '%s' "$RPM_GPG_PASSPHRASE" > ~/.gnupg/pp
+          fi
+          printf '%s\n' "$RPM_GPG_PRIVATE_KEY" | gpg --batch --import
+          KEYID="$(gpg --list-secret-keys --with-colons | awk -F: '$1=="sec"{print $5; exit}')"
+          echo "keyid=$KEYID" >> "$GITHUB_OUTPUT"
+
+      - name: Generate repository
+        env:
+          RPM_GPG_KEY_ID: ${{ steps.key.outputs.keyid }}
+        run: ./scripts/make-repo.sh dist site "$GITHUB_REPOSITORY"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: repo
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
